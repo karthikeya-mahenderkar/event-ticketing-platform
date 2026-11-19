@@ -18,6 +18,7 @@ import java.util.Objects;
 import java.util.UUID;
 import lombok.AllArgsConstructor;
 import lombok.Builder;
+import org.hibernate.annotations.ColumnDefault;
 import lombok.Getter;
 import lombok.NoArgsConstructor;
 import lombok.Setter;
@@ -49,6 +50,15 @@ public class TicketType {
 
   @Column(name = "total_available")
   private Integer totalAvailable;
+
+  /**
+   * Tickets sold so far. Only ever changed by the atomic conditional UPDATE in
+   * {@code TicketTypeRepository#reserveTicket}, never read-modify-written in Java.
+   */
+  @Builder.Default
+  @ColumnDefault("0")
+  @Column(name = "sold_count", nullable = false)
+  private Integer soldCount = 0;
 
   @ManyToOne(fetch = FetchType.LAZY)
   @JoinColumn(name = "event_id")

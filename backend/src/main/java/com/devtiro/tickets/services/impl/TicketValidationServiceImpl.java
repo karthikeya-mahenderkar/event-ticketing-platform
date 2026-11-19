@@ -35,7 +35,9 @@ public class TicketValidationServiceImpl implements TicketValidationService {
             )
         ));
 
-    Ticket ticket = qrCode.getTicket();
+    // Lock the ticket row so two simultaneous scans are validated one after another.
+    Ticket ticket = ticketRepository.findByIdForUpdate(qrCode.getTicket().getId())
+        .orElseThrow(TicketNotFoundException::new);
 
     return validateTicket(ticket, TicketValidationMethod.QR_SCAN);
   }
@@ -46,11 +48,13 @@ public class TicketValidationServiceImpl implements TicketValidationService {
     ticketValidation.setTicket(ticket);
     ticketValidation.setValidationMethod(ticketValidationMethod);
 
-    TicketValidationStatusEnum ticketValidationStatus = ticket.getValidations().stream()
-        .filter(v -> TicketValidationStatusEnum.VALID.equals(v.getStatus()))
-        .findFirst()
-        .map(v -> TicketValidationStatusEnum.INVALID)
-        .orElse(TicketValidationStatusEnum.VALID);
+    // Query the database (not the cached collection) so a scan that committed while we
+    // waited for the lock is seen. Only the first successful scan is VALID.
+    boolean alreadyValidated = ticketValidationRepository.existsByTicketIdAndStatus(
+        ticket.getId(), TicketValidationStatusEnum.VALID);
+    TicketValidationStatusEnum ticketValidationStatus = alreadyValidated
+        ? TicketValidationStatusEnum.INVALID
+        : TicketValidationStatusEnum.VALID;
 
     ticketValidation.setStatus(ticketValidationStatus);
 
@@ -59,7 +63,7 @@ public class TicketValidationServiceImpl implements TicketValidationService {
 
   @Override
   public TicketValidation validateTicketManually(UUID ticketId) {
-    Ticket ticket = ticketRepository.findById(ticketId)
+    Ticket ticket = ticketRepository.findByIdForUpdate(ticketId)
         .orElseThrow(TicketNotFoundException::new);
     return validateTicket(ticket, TicketValidationMethod.MANUAL);
   }

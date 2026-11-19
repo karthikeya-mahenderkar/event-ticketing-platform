@@ -13,6 +13,7 @@ import jakarta.persistence.JoinColumn;
 import jakarta.persistence.ManyToOne;
 import jakarta.persistence.OneToMany;
 import jakarta.persistence.Table;
+import jakarta.persistence.UniqueConstraint;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.List;
@@ -27,7 +28,13 @@ import org.springframework.data.annotation.CreatedDate;
 import org.springframework.data.annotation.LastModifiedDate;
 
 @Entity
-@Table(name = "tickets")
+@Table(
+    name = "tickets",
+    uniqueConstraints = @UniqueConstraint(
+        name = "uk_tickets_purchaser_idempotency_key",
+        columnNames = {"purchaser_id", "idempotency_key"}
+    )
+)
 @Getter
 @Setter
 @NoArgsConstructor
@@ -51,6 +58,13 @@ public class Ticket {
   @ManyToOne(fetch = FetchType.LAZY)
   @JoinColumn(name = "purchaser_id")
   private User purchaser;
+
+  /**
+   * Client-supplied key from the Idempotency-Key header. Unique per purchaser, so a retried
+   * purchase request can never create a second ticket.
+   */
+  @Column(name = "idempotency_key", length = 100)
+  private String idempotencyKey;
 
   @OneToMany(mappedBy = "ticket", cascade = CascadeType.ALL)
   private List<TicketValidation> validations = new ArrayList<>();
