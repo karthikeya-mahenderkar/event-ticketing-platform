@@ -1,5 +1,35 @@
 # Event Ticket App
 
+> **About this repo.** I built this project by following Devtiro's published, step-by-step
+> Event Ticket Platform build guide (included in [`docs/`](docs/event-ticket-app-combined.md)).
+> I implemented and ran every backend layer myself; the React frontend was provided by the guide.
+> Interactive demo of the concurrency behaviour on my portfolio:
+> [karthikeya-mahenderkar.vercel.app](https://karthikeya-mahenderkar.vercel.app/#case-event-ticketing)
+
+## What I implemented
+
+- **Spring Boot REST backend** in a layered architecture (controllers → services → repositories)
+  for events, ticket types, purchases, QR codes and ticket validation.
+- **Overselling protection:** `purchaseTicket()` runs in a transaction and loads the ticket type with
+  `@Lock(LockModeType.PESSIMISTIC_WRITE)` (`SELECT … FOR UPDATE`), so concurrent buyers of the last
+  ticket are serialised and the loser gets `TicketsSoldOutException`.
+- **Security:** Keycloak-issued JWTs, roles mapped from `realm_access`, `ORGANIZER` and `STAFF`
+  restricted endpoints, and users provisioned from token claims on first request.
+- **QR tickets:** random-UUID QR codes rendered with ZXing; QR or manual validation where a second
+  scan of an already-validated ticket is recorded as `INVALID`.
+- Ran the full stack locally with **PostgreSQL, Adminer and Keycloak in Docker Compose**.
+
+## What I'd change next
+
+- **Validation race:** two simultaneous scans of the same ticket could both be marked `VALID`.
+  Lock the ticket row during validation, or add a partial unique index allowing one `VALID` scan per ticket.
+- **First-login race:** two concurrent first requests could both insert the same user; use an upsert.
+- **Counting on every purchase:** replace `countByTicketTypeId` with a `sold` counter and an atomic
+  `UPDATE … WHERE sold < total_available`.
+- **Retries:** accept an idempotency key on purchase so a client retry can't buy twice.
+
+---
+
 <!-- This is the backend and frontend source code for the Devtiro event ticket app build published June
 2025. -->
 
