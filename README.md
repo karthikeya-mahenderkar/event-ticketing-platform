@@ -1,118 +1,111 @@
-# Event Ticket App
+# Event Ticketing Platform
 
-> **About this repo.** I built this project by following Devtiro's published, step-by-step
-> Event Ticket Platform build guide (included in [`docs/`](docs/event-ticket-app-combined.md)).
-> I implemented and ran every backend layer myself; the React frontend was provided by the guide.
-> Interactive demo of the concurrency behaviour on my portfolio:
-> [karthikeya-mahenderkar.vercel.app](https://karthikeya-mahenderkar.vercel.app/#case-event-ticketing)
+A full-stack event-ticketing platform: organizers create events and ticket types, attendees buy
+tickets and receive QR codes, and staff validate tickets at the door. The focus is **correctness under
+concurrency**: the last ticket can never be sold twice, a retried purchase never buys twice, and a
+ticket can never be admitted twice.
 
-## What I implemented
+▶️ Interactive demo of the concurrency behaviour:
+[karthikeya-mahenderkar.vercel.app](https://karthikeya-mahenderkar.vercel.app/#case-event-ticketing)
 
-- **Spring Boot REST backend** in a layered architecture (controllers → services → repositories)
-  for events, ticket types, purchases, QR codes and ticket validation.
-- **Overselling protection:** `purchaseTicket()` runs in a transaction and loads the ticket type with
-  `@Lock(LockModeType.PESSIMISTIC_WRITE)` (`SELECT … FOR UPDATE`), so concurrent buyers of the last
-  ticket are serialised and the loser gets `TicketsSoldOutException`.
-- **Security:** Keycloak-issued JWTs, roles mapped from `realm_access`, `ORGANIZER` and `STAFF`
-  restricted endpoints, and users provisioned from token claims on first request.
-- **QR tickets:** random-UUID QR codes rendered with ZXing; QR or manual validation where a second
-  scan of an already-validated ticket is recorded as `INVALID`.
-- Ran the full stack locally with **PostgreSQL, Adminer and Keycloak in Docker Compose**.
+**Stack:** Java 21 · Spring Boot 3.4 · Spring Data JPA / Hibernate · PostgreSQL · Keycloak (OIDC/JWT) ·
+ZXing · React + Vite · Docker Compose
 
-## What I'd change next
+> This project started from a public build tutorial and has since been extended. The concurrency
+> work below (atomic inventory, idempotent purchases, race-free validation and the concurrency
+> test suite) is my own. The original MIT licence notice is kept in [`LICENSE`](LICENSE).
 
-- **Validation race:** two simultaneous scans of the same ticket could both be marked `VALID`.
-  Lock the ticket row during validation, or add a partial unique index allowing one `VALID` scan per ticket.
-- **First-login race:** two concurrent first requests could both insert the same user; use an upsert.
-- **Counting on every purchase:** replace `countByTicketTypeId` with a `sold` counter and an atomic
-  `UPDATE … WHERE sold < total_available`.
-- **Retries:** accept an idempotency key on purchase so a client retry can't buy twice.
+## Concurrency guarantees
 
----
+All three are proven by tests that fire real simultaneous requests
+(`TicketConcurrencyTest` in [`backend/src/test`](backend/src/test)).
 
-<!-- This is the backend and frontend source code for the Devtiro event ticket app build published June
-2025. -->
+### 1. No overselling: atomic inventory reservation
+Purchases reserve inventory with **one conditional UPDATE** instead of "lock row, count tickets, check":
 
-The Event Ticket Platform is a Spring Boot application that lets organizers create events and sell
-tickets, event goers buy those tickets, and staff scan ticket QR codes at the event. Authentication
-is handled by Keycloak. The frontend is a React application built with Vite.
+```sql
+UPDATE ticket_types SET sold_count = sold_count + 1
+ WHERE id = ? AND sold_count < total_available
+```
 
-<!-- You can check out the build video [here](https://youtu.be/vK-KQZ8cpbU). -->
+If it updates 0 rows, the ticket type is sold out. The database serialises concurrent updates of the
+same row and re-checks the condition against the latest committed value, so `sold_count` can never
+exceed `total_available`. There is no explicit lock and no `COUNT(*)` that grows with sales.
+→ `TicketTypeRepository#reserveTicket`
 
-## The Build Guide
+**Test:** 20 buyers race for 5 tickets → exactly 5 succeed, 15 get `TicketsSoldOutException`.
 
-The full step-by-step write-up of the build lives in
-[docs/event-ticket-app-combined.md](docs/event-ticket-app-combined.md). It covers the project brief,
-the user stories and UI designs, the domain and architecture design, and then builds the backend up
-endpoint by endpoint.
+### 2. No double purchase on retry: idempotency keys
+Clients can send an `Idempotency-Key` header (e.g. one UUID per checkout attempt). The key is stored on
+the ticket with a **unique constraint on `(purchaser_id, idempotency_key)`**:
+- a sequential retry finds the existing ticket and returns it;
+- concurrent retries race on the constraint: exactly one insert wins, and the losers' transactions roll
+  back, *including their inventory reservation*. The controller answers them with the same success response.
 
-## What's In This Repo
+→ `TicketTypeServiceImpl#purchaseTicket`, `TicketTypeController`
 
-| Directory   | Contents                                                          |
-| ----------- | ----------------------------------------------------------------- |
-| `docs/`     | The build guide, with its UI designs and diagrams                 |
-| `backend/`  | The Spring Boot backend, as built in the video                    |
-| `frontend/` | The React frontend, provided for you to interact with the backend |
+**Test:** the same purchase retried 5 times at once → exactly 1 ticket, `sold_count` = 1.
 
-## Running It
+### 3. No double admission: race-free validation
+Validating a ticket now locks its row (`SELECT … FOR UPDATE`) and checks for an earlier `VALID` scan with
+a fresh query rather than a cached collection. Simultaneous scans of the same ticket run one after
+another, and only the first is `VALID`.
+→ `TicketRepository#findByIdForUpdate`, `TicketValidationServiceImpl`
 
-You'll need JDK 21, Node 20 or later, and Docker.
+**Test:** 10 staff scan the same ticket at once → exactly 1 `VALID`, 9 `INVALID`.
+Without the lock, all 10 scans come back `VALID`.
+
+## Other features
+- **Role-based access** with Keycloak-issued JWTs: realm roles are mapped to Spring authorities;
+  `ORGANIZER` manages events, `STAFF` validates tickets; users are provisioned from token claims on first request.
+- **QR tickets** generated with ZXing from a random UUID (not the ticket ID), with QR or manual validation.
+- Layered architecture with DTOs and MapStruct mappers at the API boundary, and centralised error handling.
+
+## Running it
+
+You'll need JDK 21, Node 20+ and Docker.
 
 ```bash
-# Start PostgreSQL, Adminer and Keycloak, then run the backend
+# PostgreSQL, Adminer and Keycloak, then the backend
 cd backend
 docker compose up -d
 ./mvnw spring-boot:run
 
-# Run the frontend, in a second terminal
+# Frontend, in a second terminal
 cd frontend
 npm install
 npm run dev
 ```
 
-The frontend runs on http://localhost:5173 and proxies API calls through to the backend on port 8080.
-The supporting services come up on these ports:
-
 | Service    | URL                   |
 | ---------- | --------------------- |
+| Frontend   | http://localhost:5173 |
+| Backend    | http://localhost:8080 |
 | Keycloak   | http://localhost:9090 |
 | Adminer    | http://localhost:8888 |
 | PostgreSQL | localhost:5432        |
 
-Keycloak needs an `event-ticket-platform` realm containing an `event-ticket-platform-app` client, to
-match the issuer URI configured in the backend and the OIDC config in `frontend/src/main.tsx`. The
-guide walks through setting this up.
+Keycloak needs an `event-ticket-platform` realm with an `event-ticket-platform-app` client, matching the
+issuer URI in `backend/src/main/resources/application.properties` and the OIDC config in
+`frontend/src/main.tsx`.
 
-<!-- > [!WARNING]
-> This project is pinned to **Java 21** and **Spring Boot 3.4.4**. It was built and tested against
-> those versions only. Newer versions of Spring Boot and Java may require changes to the code and
-> configuration in this repo, and the guide's instructions may no longer match what you see.
+**Existing local database?** `sold_count` is a new column. Back-fill it once after upgrading:
+```sql
+UPDATE ticket_types tt SET sold_count = (SELECT COUNT(*) FROM tickets t WHERE t.ticket_type_id = tt.id);
+```
 
-> [!CAUTION]
-> **This is intended for your local development environment only.** It is not production-ready. The
-> Keycloak admin credentials in `docker-compose.yml` are the default `admin`/`admin`, and the
-> database password is committed in plain text.
+## Tests
 
-> [!IMPORTANT]
-> This is a teaching project. It's written to demonstrate how a Spring Boot application is designed
-> and built, following the same practices I'd use on real work — a layered architecture, DTOs and
-> mappers at the API boundary, constructor injection, and centralised error handling.
->
-> That said, it was built live, and its scope is deliberately limited to what the build covers. It
-> may contain bugs, and some things a production system would need — comprehensive input validation,
-> a full test suite, hardened infrastructure config — are out of scope by design rather than by
-> oversight. -->
+```bash
+cd backend
+./mvnw test
+```
 
-<!-- ## Licence
+The tests run against an in-memory H2 database in PostgreSQL mode, so they need no Docker, PostgreSQL or Keycloak.
 
-This repo is licensed in two parts.
+## Local development only
+Not production-ready as configured: the Keycloak admin credentials in `docker-compose.yml` are the
+defaults and the database password is committed in plain text.
 
-**The code** — `backend/` and `frontend/` — is [MIT licensed](LICENSE). Use it, change it, build on
-it, no strings attached.
-
-**The build guide** — everything in [`docs/`](docs/LICENSE) — is licensed under
-[CC BY-NC-SA 4.0](https://creativecommons.org/licenses/by-nc-sa/4.0/). You're welcome to share it,
-translate it, and build on it, but please credit Devtiro, don't sell it or put it behind a paywall,
-and keep any adaptations under the same licence. -->
-
-<!-- Copyright © 2025 Devtiro Ltd. -->
+## Licence
+MIT. See [`LICENSE`](LICENSE).
